@@ -164,6 +164,7 @@ def extract_info(url: str) -> dict:
 
 def download_media(url, format_id, progress_cb=None):
     import yt_dlp
+    import glob
     def hook(d):
         if progress_cb and d.get("status") == "downloading":
             total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
@@ -172,6 +173,8 @@ def download_media(url, format_id, progress_cb=None):
                 try: progress_cb(done/total, d.get("speed") or 0, d.get("eta"))
                 except Exception: pass
     is_audio = format_id.startswith("bestaudio")
+    # snapshot files before download to find the new file reliably
+    before = set(os.listdir(DOWNLOAD_DIR))
     opts = {
         "format": format_id,
         "outtmpl": os.path.join(DOWNLOAD_DIR, "%(id)s.%(ext)s"),
@@ -187,14 +190,27 @@ def download_media(url, format_id, progress_cb=None):
         opts["merge_output_format"] = "mp4"
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
-        path = ydl.prepare_filename(info)
-        if is_audio:
-            mp3 = os.path.splitext(path)[0] + ".mp3"
-            if os.path.exists(mp3): path = mp3
-        elif not os.path.exists(path):
-            mp4 = os.path.splitext(path)[0] + ".mp4"
-            if os.path.exists(mp4): path = mp4
-        return path, info.get("title", "video"), info
+        title = info.get("title", "video")
+
+    # find the actual downloaded file (robust against merge/rename)
+    after = set(os.listdir(DOWNLOAD_DIR))
+    new_files = [os.path.join(DOWNLOAD_DIR, f) for f in (after - before)]
+    # filter out tiny/empty files and pick the largest
+    new_files = [f for f in new_files
+                 if os.path.isfile(f) and os.path.getsize(f) > 1024]
+    if not new_files:
+        # fallback: try prepare_filename variants
+        with yt_dlp.YoutubeDL(opts) as ydl2:
+            guess = ydl2.prepare_filename(info)
+        for cand in [guess, os.path.splitext(guess)[0] + ".mp4",
+                     os.path.splitext(guess)[0] + ".mp3",
+                     os.path.splitext(guess)[0] + ".mkv"]:
+            if os.path.isfile(cand) and os.path.getsize(cand) > 1024:
+                return cand, title, info
+        raise FileNotFoundError(
+            "Download finished but no file found. The site may have blocked it.")
+    path = max(new_files, key=os.path.getsize)
+    return path, title, info
 
 def fmt_views(n):
     if not n: return "N/A"
@@ -481,8 +497,12 @@ async def broadcast_intercept(_, m: Message):
     # store for preview
     ui_state[uid] = {"mode": "broadcast_confirm",
                      "chat_id": m.chat.id, "msg_id": m.id}
+    c = db()
+    total = c.execute("SELECT COUNT(*) c FROM users WHERE blocked=0").fetchone()["c"]
+    c.close()
     await m.reply_text(
-        "📣 <b>Broadcast Preview</b> — is this what you want to send to all users?",
+        f"📣 <b>Broadcast Preview</b>\n\n👥 Will send to <b>{total}</b> users.\n"
+        "Confirm to start?",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ Confirm & Send", callback_data="bc:confirm")],
             [InlineKeyboardButton("❌ Cancel", callback_data="bc:cancel")],
@@ -697,6 +717,11 @@ async def quality_cb(_, q: CallbackQuery):
                     if "403" in em else "")
             await safe_edit(f"❌ <b>Download failed.</b>\n<code>{em[:250]}</code>{hint}")
             pending.pop(key, None); return
+        # validate file before upload
+        if not os.path.isfile(path) or os.path.getsize(path) < 1024:
+            await safe_edit("❌ <b>Download failed.</b>\nFile is missing or empty. "
+                            "The site may have blocked the download.")
+            pending.pop(key, None); return
         size_mb = os.path.getsize(path) / (1024 * 1024)
         await safe_edit(f"⬆️ <b>Uploading</b>\n📌 {real_title}\n📦 {size_mb:.1f} MB\n\n<i>Please wait…</i>")
         caption = f"🎬 <b>{real_title}</b>\n🎚️ {label} • 📦 {size_mb:.1f} MB"
@@ -708,11 +733,17 @@ async def quality_cb(_, q: CallbackQuery):
                     performer=info.get("uploader") or info.get("channel"),
                     duration=int(info.get("duration") or 0) or None)
             else:
-                await app.send_video(
-                    q.message.chat.id, path, caption=caption,
-                    duration=int(info.get("duration") or 0) or None,
-                    width=info.get("width") or None,
-                    height=info.get("height") or None)
+                try:
+                    await app.send_video(
+                        q.message.chat.id, path, caption=caption,
+                        duration=int(info.get("duration") or 0) or None,
+                        width=info.get("width") or None,
+                        height=info.get("height") or None)
+                except Exception:
+                    # fallback: send as document if video upload fails
+                    log.warning("send_video failed, trying send_document")
+                    await app.send_document(q.message.chat.id, path,
+                                            caption=caption)
             bump_downloads(q.from_user.id)
             await safe_edit("✅ <b>Done!</b> Enjoy 🎉")
         except Exception as e:
