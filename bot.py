@@ -142,6 +142,13 @@ class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
+        # security headers
+        self.send_header("Content-Security-Policy", "default-src 'none'")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Strict-Transport-Security",
+                         "max-age=31536000; includeSubDomains")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         self.wfile.write(b"OK")
     def log_message(self, *a): pass
