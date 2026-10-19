@@ -466,7 +466,72 @@ async def ch_cb(_, q: CallbackQuery):
         "📢 <b>Force-Join Channels</b>", reply_markup=channels_kb())
     await q.answer()
 
-# ----- text input for admin modes -----
+# ----- broadcast: intercept ANY content type, with preview + confirm -----
+@app.on_message(filters.private, group=-1)
+async def broadcast_intercept(_, m: Message):
+    uid = m.from_user.id if m.from_user else 0
+    if not is_owner_uid(uid):
+        return
+    state = ui_state.get(uid)
+    if not state or state.get("mode") != "broadcast":
+        return
+    # ignore commands
+    if m.text and m.text.startswith("/"):
+        return
+    # store for preview
+    ui_state[uid] = {"mode": "broadcast_confirm",
+                     "chat_id": m.chat.id, "msg_id": m.id}
+    await m.reply_text(
+        "📣 <b>Broadcast Preview</b> — is this what you want to send to all users?",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Confirm & Send", callback_data="bc:confirm")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="bc:cancel")],
+        ]))
+    await m.stop_propagation()
+
+@app.on_callback_query(filters.regex(r"^bc:"))
+async def broadcast_confirm_cb(_, q: CallbackQuery):
+    if not is_owner_uid(q.from_user.id):
+        await q.answer("Owner only.", show_alert=True); return
+    action = q.data.split(":")[1]
+    uid = q.from_user.id
+
+    if action == "cancel":
+        ui_state.pop(uid, None)
+        await q.message.edit_text("❌ Broadcast cancelled.",
+                                  reply_markup=admin_kb())
+        await q.answer()
+        return
+
+    # confirm
+    state = ui_state.get(uid)
+    if not state or state.get("mode") != "broadcast_confirm":
+        await q.answer("No broadcast pending.", show_alert=True); return
+    chat_id, msg_id = state["chat_id"], state["msg_id"]
+    ui_state.pop(uid, None)
+
+    await q.message.edit_text("📣 <b>Broadcasting…</b>")
+    await q.answer()
+    c = db()
+    users = c.execute("SELECT user_id FROM users WHERE blocked=0").fetchall()
+    c.close()
+    total, sent = len(users), 0
+    for (u,) in users:
+        try:
+            await app.copy_message(u, chat_id, msg_id)
+            sent += 1
+        except Exception:
+            pass
+        if sent % 25 == 0:
+            try:
+                await q.message.edit_text(f"📣 Broadcasting… {sent}/{total}")
+            except Exception:
+                pass
+    await q.message.edit_text(
+        f"✅ <b>Broadcast done:</b> {sent}/{total} delivered.",
+        reply_markup=admin_kb())
+
+# ----- text input for admin modes (addchannel) -----
 @app.on_message(filters.text & ~filters.regex(URL_RE))
 async def admin_text(_, m: Message):
     uid = m.from_user.id if m.from_user else 0
@@ -475,25 +540,7 @@ async def admin_text(_, m: Message):
         return
     mode = state.get("mode")
 
-    if mode == "broadcast":
-        ui_state.pop(uid, None)
-        c = db()
-        users = c.execute("SELECT user_id FROM users WHERE blocked=0").fetchall()
-        c.close()
-        total, sent = len(users), 0
-        status = await m.reply_text(f"📣 Broadcasting to {total} users…")
-        for (u,) in users:
-            try:
-                await m.copy(u); sent += 1
-            except Exception:
-                pass
-            if sent % 25 == 0:
-                try: await status.edit_text(f"📣 {sent}/{total}…")
-                except Exception: pass
-        await status.edit_text(f"✅ Broadcast done: {sent}/{total} delivered.",
-                               reply_markup=admin_kb())
-
-    elif mode == "addchannel":
+    if mode == "addchannel":
         ui_state.pop(uid, None)
         txt = (m.text or "").strip()
         try:
