@@ -78,7 +78,7 @@ import urllib.parse
 _DEBUG_LAST = {"t": 0.0}
 
 
-def _debug_extract(url: str):
+def _debug_extract(url: str, probe: bool = False):
     """Per-client YouTube extraction report — shows exactly what each player
     client returns from THIS container's IP (heights, format counts, errors)."""
     import yt_dlp
@@ -86,6 +86,8 @@ def _debug_extract(url: str):
     if not any(h in host for h in ("youtube.com", "youtu.be")):
         return {"error": "only youtube urls allowed"}
     results = []
+    best_info = None
+    best_client = None
     for client in config.YT_CLIENTS:
         entry = {"client": client}
         try:
@@ -101,11 +103,63 @@ def _debug_extract(url: str):
                          heights=heights[-8:],
                          score=list(engine._info_score(info)),
                          title=(info.get("title") or "")[:60])
+            if best_info is None or engine._info_score(info) > engine._info_score(best_info):
+                best_info, best_client = info, client
         except Exception as e:
             entry.update(ok=False, err=str(e)[:130])
         results.append(entry)
-    return {"version": config.VERSION, "pot": _POT_OK["v"],
-            "yt_dlp": yt_dlp.version.__version__, "clients": results}
+
+    out = {"version": config.VERSION, "pot": _POT_OK["v"],
+           "yt_dlp": yt_dlp.version.__version__, "clients": results}
+
+    # format details for the richest client: which heights really have URLs?
+    if best_info is not None:
+        fmts = best_info.get("formats") or []
+        detail = []
+        for f in fmts:
+            if (f.get("vcodec") not in (None, "none")) and (f.get("height") or 0) >= 480:
+                detail.append({
+                    "id": f.get("format_id"), "h": f.get("height"),
+                    "proto": f.get("protocol"), "ext": f.get("ext"),
+                    "has_url": bool(f.get("url")),
+                    "fs": f.get("filesize") or f.get("filesize_approx") or 0,
+                    "note": (f.get("format_note") or "")[:24],
+                })
+        detail.sort(key=lambda x: (x["h"] or 0), reverse=True)
+        out["best_client"] = best_client
+        out["hd_formats"] = detail[:14]
+
+    # optional real download probe: what does the 720p selector actually pick?
+    if probe and best_client:
+        import glob as _glob
+        probe_dir = "/tmp/ytdl_probe"
+        shutil.rmtree(probe_dir, ignore_errors=True)
+        os.makedirs(probe_dir, exist_ok=True)
+        probe = {"client": best_client}
+
+        def hook(d):
+            if d.get("status") == "downloading":
+                idict = d.get("info_dict") or {}
+                probe["picked"] = {
+                    "format_id": idict.get("format_id"),
+                    "h": idict.get("height"),
+                    "proto": d.get("info_dict", {}).get("protocol"),
+                    "downloaded_bytes": d.get("downloaded_bytes", 0),
+                }
+                raise yt_dlp.utils.DownloadCancelled()
+
+        try:
+            engine._download_once(url, "bv*[height<=720]+ba/b[height<=720]/b",
+                                  best_client, probe_dir, progress_cb=hook)
+            probe["result"] = "completed?! (should have cancelled)"
+        except yt_dlp.utils.DownloadCancelled:
+            probe["result"] = "cancelled after first bytes (expected)"
+        except Exception as e:
+            probe["result"] = "ERROR: " + str(e)[:180]
+        finally:
+            shutil.rmtree(probe_dir, ignore_errors=True)
+        out["probe_720"] = probe
+    return out
 
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -127,7 +181,8 @@ class HealthHandler(BaseHTTPRequestHandler):
         else:
             _DEBUG_LAST["t"] = now
             try:
-                body = json.dumps(_debug_extract(url)).encode()
+                body = json.dumps(_debug_extract(
+                    url, probe=(qs.get("probe") or ["0"])[0] == "1")).encode()
             except Exception as e:
                 body = json.dumps({"error": str(e)[:200]}).encode()
         self.send_response(200)
