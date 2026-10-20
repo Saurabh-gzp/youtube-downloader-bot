@@ -53,7 +53,12 @@ YT_CLIENTS = [c.strip() for c in os.environ.get(
     "YT_CLIENTS", "default,web_safari,android_vr,tv,android").split(",") if c.strip()]
 YOUTUBE_COOKIES = os.environ.get("YOUTUBE_COOKIES", "").strip()  # raw cookies.txt content or path
 
-VERSION = "5.1"
+# Public URL for the keepalive self-ping (prevents platform idle-sleep).
+# APP_URL/PUBLIC_URL env wins; the deployed subdomain is the fallback.
+PUBLIC_URL = (os.environ.get("APP_URL") or os.environ.get("PUBLIC_URL")
+              or "https://youtube-downloader-bot.antideploy.app").strip().rstrip("/")
+
+VERSION = "5.2"
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),

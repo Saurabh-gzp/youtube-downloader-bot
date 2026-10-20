@@ -24,6 +24,7 @@ BCAST_STOP: dict = {}     # owner_id -> bool
 UI_STATE: dict = {}       # user_id -> {"mode": "addchannel"|"broadcast_confirm", ...}
 
 START_TS = time.time()
+LAST_UPDATE_TS: float = 0.0   # last Telegram update received (0 = none yet)
 
 
 def esc(s) -> str:

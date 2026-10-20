@@ -181,7 +181,8 @@ def download_media(url: str, fmt: str, client: str, task_dir: str,
         "format": fmt,
         "outtmpl": os.path.join(task_dir, "%(id)s.%(ext)s"),
         "progress_hooks": [hook],
-        "concurrent_fragment_downloads": 3,
+        "concurrent_fragment_downloads": 2,   # keep RAM low on small containers
+        "http_chunk_size": 10 * 1024 * 1024,  # 10MB chunks → bounded memory
         "max_filesize": int(config.MAX_FILE_GB * (1024 ** 3)) or None,
         # resolution first, then Telegram-friendly codecs at equal resolution
         "format_sort": ["res", "vcodec:h264", "acodec:aac"],
