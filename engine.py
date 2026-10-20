@@ -56,7 +56,7 @@ def _base_opts(client: str) -> dict:
         "retries": 3,
         "nocheckcertificate": True,
     }
-    if client:
+    if client and client != "default":
         opts["extractor_args"] = {"youtube": {"player_client": [client]}}
     cf = _cookiefile()
     if cf:
@@ -65,17 +65,39 @@ def _base_opts(client: str) -> dict:
 
 
 _SOFT_ERRORS = ("403", "forbidden", "sign in to confirm", "rate limit",
-                "unavailable", "blocked", "unable to download", "precondition")
+                "unavailable", "blocked", "unable to download", "precondition",
+                "requested format is not available", "no video formats",
+                "needs to be reloaded", "reload", "captcha", "confirm you",
+                "not a bot", "playback", "nsfwi", "age")
+
+
+def _info_score(info: dict) -> tuple:
+    """Rank an info dict by how rich its format list is.
+
+    (max_height, n_video_formats, n_formats) — higher is better. Some player
+    clients (notably android) return a tiny format list capped at 360p without
+    erroring, so we extract from every client and keep the best one.
+    Only formats with a usable URL count — some clients list formats that
+    cannot actually be downloaded (SABR / PO-token gated).
+    """
+    fmts = [f for f in (info.get("formats") or [])
+            if f.get("url") or f.get("fragments") or f.get("manifest_url")]
+    vids = [f for f in fmts if f.get("vcodec") not in (None, "none")]
+    heights = [(f.get("height") or 0) for f in vids]
+    return (max(heights) if heights else 0, len(vids), len(fmts))
 
 
 def extract_info(url: str, clients=None) -> tuple:
-    """Try each player client until one works.
+    """Extract from every player client and return the RICHEST result.
 
-    Returns (info_dict, client_used). Raises the last error if all fail.
+    Returns (info_dict, client_used). Clients that soft-fail (403, rate
+    limit…) are skipped; the remaining results are ranked by format-list
+    richness so the user always sees every quality the video really has.
     Runs in a worker thread — never call from the event loop directly.
     """
     import yt_dlp
-    clients = clients or config.YT_CLIENTS
+    clients = list((clients or config.YT_CLIENTS)[:5])  # cap latency
+    best = None            # (score, info, client)
     last_err = None
     for client in clients:
         try:
@@ -84,7 +106,12 @@ def extract_info(url: str, clients=None) -> tuple:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
             if info:
-                return info, client
+                score = _info_score(info)
+                if best is None or score > best[0]:
+                    best = (score, info, client)
+                # HD in hand and the list is rich — no need to try more clients
+                if score[0] >= 1080 and score[1] >= 6:
+                    break
         except yt_dlp.utils.DownloadError as e:
             msg = str(e)
             last_err = e
@@ -95,6 +122,8 @@ def extract_info(url: str, clients=None) -> tuple:
         except Exception as e:
             last_err = e
             continue
+    if best:
+        return best[1], best[2]
     raise last_err or RuntimeError("extract failed")
 
 
@@ -154,6 +183,8 @@ def download_media(url: str, fmt: str, client: str, task_dir: str,
         "progress_hooks": [hook],
         "concurrent_fragment_downloads": 3,
         "max_filesize": int(config.MAX_FILE_GB * (1024 ** 3)) or None,
+        # resolution first, then Telegram-friendly codecs at equal resolution
+        "format_sort": ["res", "vcodec:h264", "acodec:aac"],
     })
     if is_audio:
         opts["postprocessors"] = [{

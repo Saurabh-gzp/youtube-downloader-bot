@@ -42,21 +42,18 @@ MAX_CONCURRENT = max(1, _int("MAX_CONCURRENT", 2))          # parallel downloads
 COOLDOWN_SECONDS = max(0, _int("COOLDOWN_SECONDS", 15))      # per-user anti-spam
 MAX_FILE_GB = _float("MAX_FILE_GB", 1.9)                     # Telegram bot upload limit is 2GB
 PENDING_TTL = max(300, _int("PENDING_TTL", 1800))            # stale menu/session lifetime (s)
-ASK_COOLDOWN = max(5, _int("ASK_COOLDOWN", 25))              # /ask AI cooldown per user
 MAX_BROADCAST_SPEED = max(5, _int("BROADCAST_PER_SECOND", 20))
 
 # --- yt-dlp ---
-# Player clients tried in order until one works (YouTube 403 bypass).
+# Player clients tried in order. "default" = yt-dlp's own maintained pipeline.
+# IMPORTANT: android must stay LAST — YouTube's android client returns a
+# limited format list (360p max) without a PO token, yet never errors,
+# which silently caps quality for everyone.
 YT_CLIENTS = [c.strip() for c in os.environ.get(
-    "YT_CLIENTS", "android,web_safari,android_vr,web").split(",") if c.strip()]
+    "YT_CLIENTS", "default,web_safari,android_vr,tv,android").split(",") if c.strip()]
 YOUTUBE_COOKIES = os.environ.get("YOUTUBE_COOKIES", "").strip()  # raw cookies.txt content or path
 
-# --- AI (OpenRouter) ---
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
-AI_MODEL = os.environ.get("AI_MODEL", "openai/gpt-4o-mini").strip()
-AI_ENABLED = OPENROUTER_API_KEY.startswith("sk-or")          # guard against wrong keys
-
-VERSION = "5.0"
+VERSION = "5.1"
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),

@@ -90,7 +90,6 @@ def register(app, db):
                 f"⬇️ Downloads: <b>{s['downloads']}</b> (today: <b>{s['today']}</b>)\n"
                 f"📢 Channels: <b>{s['channels']}</b>\n"
                 f"🗄️ Mongo: {'✅ connected' if s['mongo'] else '❌ down'}\n"
-                f"🤖 AI: {'✅ ' + config.AI_MODEL if config.AI_ENABLED else '❌ off'}\n"
                 f"⚙️ Active downloads: <b>{len(utils.ACTIVE_TASKS)}</b> • "
                 f"Queue: <b>{utils.WAITING}</b>\n"
                 f"⏱️ Uptime: {utils.uptime()}",

@@ -1,6 +1,6 @@
 pyrogram>=2.0.106
 tgcrypto>=1.2.5
-yt-dlp>=2024.10.7
+yt-dlp>=2026.8.19
 motor>=3.6.0
 dnspython>=2.6.1
 httpx>=0.27.0

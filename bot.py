@@ -1,8 +1,8 @@
-"""Entry point — Video Downloader Bot v5 (MongoDB edition).
+"""Entry point — Video Downloader Bot v5 (yt-dlp + MongoDB edition).
 
 Env: API_ID, API_HASH, BOT_TOKEN, OWNER_ID, MONGODB_URI, MONGODB_DB,
      DOWNLOAD_DIR, PORT, MAX_CONCURRENT, COOLDOWN_SECONDS, MAX_FILE_GB,
-     YT_CLIENTS, YOUTUBE_COOKIES, OPENROUTER_API_KEY, AI_MODEL
+     YT_CLIENTS, YOUTUBE_COOKIES
 """
 import os
 import json
@@ -10,6 +10,7 @@ import shutil
 import asyncio
 import threading
 import time
+import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from pyrogram import Client, idle
@@ -48,7 +49,6 @@ class HealthHandler(BaseHTTPRequestHandler):
             "active_downloads": len(utils.ACTIVE_TASKS),
             "queue": utils.WAITING,
             "mongo": database.ok,
-            "ai": config.AI_ENABLED,
         }).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -79,7 +79,6 @@ def setup_menu_button():
             "commands": json.dumps([
                 {"command": "start", "description": "🏠 Main menu"},
                 {"command": "help", "description": "❓ How to use"},
-                {"command": "ask", "description": "🤖 Ask AI"},
                 {"command": "cancel", "description": "🛑 Cancel download"},
                 {"command": "ping", "description": "🏓 Check status"},
             ]),
@@ -102,10 +101,23 @@ def startup_cleanup():
         pass
 
 
-async def main():
-    log.info("Video Downloader Bot v%s starting…", config.VERSION)
-    startup_cleanup()
+def keepalive_loop():
+    """Self-ping the public URL every 4 minutes so the container never
+    counts as idle (platforms sometimes sleep apps on HTTP inactivity,
+    which would take a polling Telegram bot offline)."""
+    url = os.environ.get("APP_URL", "").strip()
+    if not url:
+        return
+    while True:
+        time.sleep(240)
+        try:
+            urllib.request.urlopen(url, timeout=20).read()
+        except Exception:
+            pass
 
+
+async def run_bot():
+    """One full bot lifecycle: mongo, menu, start, notify, idle."""
     for attempt in range(1, 4):
         if await database.ping():
             break
@@ -121,7 +133,6 @@ async def main():
                   "Check MONGODB_URI / Atlas network access (allow 0.0.0.0/0).")
 
     await asyncio.to_thread(setup_menu_button)
-    threading.Thread(target=run_health_server, daemon=True).start()
 
     await app.start()
     me = await app.get_me()
@@ -130,9 +141,9 @@ async def main():
         try:
             await app.send_message(
                 config.OWNER_ID,
-                f"🚀 <b>Bot v{config.VERSION} started</b>\n"
+                f"🚀 <b>Video Downloader Bot v{config.VERSION} started</b>\n"
+                f"⬇️ yt-dlp engine ready (up to 1080p + MP3)\n"
                 f"🗄️ Mongo: {'✅' if database.ok else '❌ down'}\n"
-                f"🤖 AI: {'✅ ' + config.AI_MODEL if config.AI_ENABLED else '❌ off'}\n"
                 f"⚙️ Max concurrent: {config.MAX_CONCURRENT}")
         except Exception as e:
             log.warning("owner notify failed: %s", e)
@@ -142,6 +153,30 @@ async def main():
     janitor.cancel()
     await app.stop()
     log.info("Bot stopped cleanly.")
+
+
+async def main():
+    log.info("Video Downloader Bot v%s starting…", config.VERSION)
+    startup_cleanup()
+    threading.Thread(target=run_health_server, daemon=True).start()
+    threading.Thread(target=keepalive_loop, daemon=True).start()
+
+    # supervisor: never let a crash take the container down for good
+    backoff = 5
+    while True:
+        try:
+            await run_bot()
+            break  # clean shutdown
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.exception("bot crashed: %s — restarting in %ds", e, backoff)
+            try:
+                await app.stop()
+            except Exception:
+                pass
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 300)
 
 
 if __name__ == "__main__":

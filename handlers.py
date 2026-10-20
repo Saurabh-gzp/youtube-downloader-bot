@@ -14,7 +14,6 @@ from pyrogram.errors import UserNotParticipant, ChannelPrivate, FloodWait
 import config
 import utils
 import engine
-import ai
 
 log = logging.getLogger("ytdl.handlers")
 
@@ -27,9 +26,9 @@ QUALITIES = [
 ]
 
 WELCOME = (
-    "👋 <b>Welcome to Video Downloader Bot</b>\n\n"
-    "Send me a <b>video link</b> — or just type a <b>song/movie name</b> to search.\n\n"
-    "✅ YouTube + 1000+ sites\n"
+    "👋 <b>Video Downloader Bot</b>\n\n"
+    "Send me a <b>video link</b> — or type a <b>song/movie name</b> to search.\n\n"
+    "✅ YouTube + 1000+ sites (yt-dlp engine)\n"
     "✅ Up to 1080p + MP3\n"
     "✅ Large files via MTProto (no 50MB limit)\n"
     "✅ Live search with 🔍\n\n"
@@ -41,8 +40,8 @@ HELP_TEXT = (
     "2️⃣ Pick a quality (sizes shown where known)\n"
     "3️⃣ Watch live progress — download & upload\n\n"
     "💡 <b>Tips</b>\n"
-    "• /ask — ask the AI assistant anything\n"
     "• /cancel — stop a download\n"
+    "• /ping — bot status\n"
     f"• Max file size: {config.MAX_FILE_GB} GB (Telegram limit)\n"
     f"• Cooldown: {config.COOLDOWN_SECONDS}s between requests"
 )
@@ -173,35 +172,6 @@ def register(app, db):
             f"🗄️ Mongo: {'✅' if db.ok else '❌'}\n"
             f"⚙️ Active: {len(utils.ACTIVE_TASKS)} • Queue: {utils.WAITING}")
 
-    @app.on_message(filters.private & filters.command("ask"))
-    async def ask_cmd(_, m: Message):
-        uid = m.from_user.id if m.from_user else 0
-        if not config.AI_ENABLED:
-            await m.reply_text("🤖 <b>AI is not configured.</b>\n"
-                               "Owner: set a valid OPENROUTER_API_KEY "
-                               "(starts with sk-or-).")
-            return
-        last = utils.LAST_ASK.get(uid, 0)
-        remain = config.ASK_COOLDOWN - int(time.time() - last)
-        if remain > 0 and not utils.is_owner(uid):
-            await m.reply_text(f"⏳ Wait {remain}s before asking again.")
-            return
-        parts = (m.text or "").split(maxsplit=1)
-        if len(parts) < 2 or not parts[1].strip():
-            await m.reply_text("Usage: <code>/ask your question</code>")
-            return
-        utils.LAST_ASK[uid] = time.time()
-        status = await m.reply_text("🤔 <i>Thinking…</i>")
-        try:
-            ans = await ai.chat(parts[1].strip()[:1000])
-            ans = ans[:3800] or "…"
-            await status.edit_text(f"🤖 <b>AI:</b>\n\n{utils.esc(ans)}")
-        except Exception as e:
-            log.warning("ask failed: %s", e)
-            await status.edit_text(
-                "❌ <b>AI is busy or unavailable.</b> Try again shortly.\n"
-                f"<code>{utils.esc(str(e)[:150])}</code>")
-
     # ---------------- menu callbacks ----------------
     @app.on_callback_query(filters.regex(r"^menu:"))
     async def menu_cb(_, q: CallbackQuery):
@@ -274,16 +244,20 @@ def register(app, db):
         platform = engine.platform_of(info.get("webpage_url") or url)
 
         key = f"c{src.chat.id}m{src.id}"
+        ests = [engine.estimate_size(info, qo) for qo in QUALITIES]
         utils.pending_put(key, {
             "type": "url", "url": info.get("webpage_url") or url,
             "title": title, "thumb": info.get("thumbnail"),
-            "duration": duration, "client": client,
+            "duration": duration, "client": client, "ests": ests,
         })
 
         rows = []
         for i, qo in enumerate(QUALITIES):
-            est = engine.estimate_size(info, qo)
+            est = ests[i]
+            too_big = est and est > config.MAX_FILE_GB * (1024 ** 3)
             label = qo["label"] + (f" · ≈{utils.fmt_size(est)}" if est else "")
+            if too_big:
+                label = "⚠️ " + label + " (too big)"
             rows.append([InlineKeyboardButton(label, callback_data=f"q|{key}|{i}")])
         view_s = (f" • 👁️ {utils.fmt_views(info.get('view_count'))}"
                   if info.get("view_count") else "")
@@ -334,9 +308,8 @@ def register(app, db):
     # ---------------- search ----------------
     async def do_search(m: Message, query: str):
         status = await m.reply_text("🔍 <i>Searching YouTube…</i>")
-        qtext = query
-        if config.AI_ENABLED:
-            qtext = await ai.clean_query(query)
+        qtext = query.strip()
+
         def _s():
             info, _c = engine.extract_info(f"ytsearch5:{qtext}")
             return info
@@ -493,11 +466,19 @@ def register(app, db):
                 thumb = engine.make_thumbnail(
                     path, os.path.join(task_dir, "thumb.jpg"))
 
+            # honest note if we could not deliver the requested quality
+            got_h = info.get("height") or 0
+            note = ""
+            if not qo.get("audio") and qo.get("h") and got_h \
+                    and got_h + 60 < qo["h"]:
+                note = (f"\n⚠️ {qo['label']} available nahi thi — "
+                        f"best {got_h}p delivered.")
+
             up_state = {"last": 0.0}
             up_cb = upload_progress_cb(up_state, status_msg, real_title,
                                        label, cancel_btn)
             cap = (f"🎬 <b>{utils.esc(real_title)}</b>\n"
-                   f"🎚️ {label} • 📦 {utils.fmt_size(size)}\n"
+                   f"🎚️ {label} • 📦 {utils.fmt_size(size)}{note}\n"
                    f"@{((await app.get_me()).username or '')}")
             chat_id = status_msg.chat.id
             duration = int(info.get("duration") or 0) or None
@@ -576,6 +557,14 @@ def register(app, db):
             await q.answer(f"Wait {cd}s.", show_alert=True); return
         if idx >= len(QUALITIES):
             await q.answer("Invalid quality.", show_alert=True); return
+        ests = data.get("ests") or []
+        est = ests[idx] if idx < len(ests) else 0
+        if est and est > config.MAX_FILE_GB * (1024 ** 3):
+            await q.answer(
+                f"This quality is ≈{utils.fmt_size(est)} — above the "
+                f"{config.MAX_FILE_GB} GB Telegram limit. Pick a lower one.",
+                show_alert=True)
+            return
         ok, _missing = await force_join_ok(uid)
         if not ok:
             await q.answer("Join channel(s) first.", show_alert=True); return

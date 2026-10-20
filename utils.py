@@ -20,7 +20,6 @@ USER_ACTIVE: dict = {}    # user_id -> key (one download per user)
 CANCEL_FLAGS: dict = {}   # key -> bool (cooperative cancel for yt-dlp thread)
 WAITING: int = 0          # download queue length
 LAST_REQ: dict = {}       # user_id -> ts (cooldown)
-LAST_ASK: dict = {}       # user_id -> ts (/ask cooldown)
 BCAST_STOP: dict = {}     # owner_id -> bool
 UI_STATE: dict = {}       # user_id -> {"mode": "addchannel"|"broadcast_confirm", ...}
 
@@ -142,8 +141,6 @@ def cleanup_stale() -> int:
         PENDING.pop(k, None)
     if len(LAST_REQ) > 5000:
         LAST_REQ.clear()
-    if len(LAST_ASK) > 5000:
-        LAST_ASK.clear()
     return len(stale)
 
 
