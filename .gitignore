@@ -1,6 +1,9 @@
 __pycache__/
-*.pyc
-.env
-.session
+*.py[cod]
+*.session
 *.session-journal
-/tmp/
+.env
+downloads/
+tasks/
+.antideploy.json.bak
+.DS_Store
