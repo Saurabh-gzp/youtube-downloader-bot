@@ -4,3 +4,4 @@ yt-dlp>=2026.8.19
 motor>=3.6.0
 dnspython>=2.6.1
 certifi>=2024.8.30
+bgutil-ytdlp-pot-provider>=2.0.2

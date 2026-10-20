@@ -35,6 +35,21 @@ log = config.log
 # ---- shared holders (health thread reads them) ----
 _APP_HOLDER = []                    # [current Client or empty]
 _RESTART_FLAG = {"v": False}        # set by watchdog → run_bot exits cleanly
+_POT_OK = {"v": False}              # bgutil PO-token server reachable?
+
+
+def pot_check():
+    """Probe the bgutil PO-token server (started alongside the bot in the
+    container). Fixes YouTube 403 on datacenter IPs — see Dockerfile."""
+    for _ in range(5):
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:4416/ping",
+                                        timeout=4) as r:
+                if r.status == 200:
+                    _POT_OK["v"] = True
+                    return
+        except Exception:
+            time.sleep(3)
 
 
 def make_client() -> Client:
@@ -76,6 +91,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             "active_downloads": len(utils.ACTIVE_TASKS),
             "queue": utils.WAITING,
             "mongo": database.ok,
+            "pot": _POT_OK["v"],
         }).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -190,6 +206,12 @@ async def run_bot():
     else:
         log.error("MongoDB DOWN — bot runs in degraded mode (no persistence). "
                   "Check MONGODB_URI / Atlas network access (allow 0.0.0.0/0).")
+
+    await asyncio.to_thread(pot_check)
+    if _POT_OK["v"]:
+        log.info("POT server reachable — YouTube 403 protection ON")
+    else:
+        log.warning("POT server NOT reachable — script-mode fallback will be used")
 
     await app.start()
     me = await app.get_me()

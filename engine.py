@@ -1,4 +1,4 @@
-"""yt-dlp download engine: client retry, size guards, cooperative cancel."""
+"""yt-dlp download engine: client retry, size guards, PO-token fallback."""
 import os
 import glob
 import uuid
@@ -154,13 +154,70 @@ def estimate_size(info: dict, quality: dict) -> int:
     return int((vsize + asize) * 1.05)
 
 
+_EXTRA_FALLBACK_CLIENTS = ("mweb", "tv", "web_safari", "android_vr")
+_EXCLUDE_CLIENTS = {"android"}  # capped at 360p without PO token — useless for downloads
+
+
+def _client_chain(primary: str) -> list:
+    """Primary client first, then proven fallbacks — capped to 4 attempts."""
+    chain = [primary] if primary and primary not in _EXCLUDE_CLIENTS else []
+    for c in tuple(_EXTRA_FALLBACK_CLIENTS) + tuple(config.YT_CLIENTS):
+        if c not in chain and c not in _EXCLUDE_CLIENTS:
+            chain.append(c)
+    return chain[:4]
+
+
 def download_media(url: str, fmt: str, client: str, task_dir: str,
                    progress_cb=None, cancelled=None) -> tuple:
-    """Download to task_dir. Returns (path, title, info).
+    """Download with automatic client fallback on YouTube IP blocks.
 
-    progress_cb(frac, speed, eta) is called from this thread.
-    cancelled() -> bool is checked in the progress hook to abort cleanly.
+    YouTube 403s ("unable to download video data") are format-URL blocks
+    tied to the player client that issued them — switching to another
+    client (fresh URLs + fresh PO token) usually succeeds. Retries are
+    bounded to the first 4 clients in the chain.
     """
+    import yt_dlp
+    chain = _client_chain(client)
+    last = None
+    for attempt, c in enumerate(chain):
+        if cancelled is not None and cancelled():
+            raise yt_dlp.utils.DownloadCancelled()
+        try:
+            return _download_once(url, fmt, c, task_dir, progress_cb, cancelled)
+        except yt_dlp.utils.DownloadCancelled:
+            raise
+        except yt_dlp.utils.DownloadError as e:
+            msg = str(e).lower()
+            last = e
+            hard = any(p in msg for p in
+                       ("403", "forbidden", "sign in", "not a bot",
+                        "rate limit", "precondition", "unavailable",
+                        "removed", "unable to download"))
+            if not hard:
+                raise
+            nxt = chain[attempt + 1] if attempt + 1 < len(chain) else None
+            if not nxt:
+                raise
+            log.warning("download failed with client=%s (%.140s) — retrying with %s",
+                        c, str(e), nxt)
+            # clean partial files so the next attempt starts fresh
+            for pat in ("*.part", "*.ytdl", "*.f*.part-Frag*"):
+                for p in glob.glob(os.path.join(task_dir, pat)):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+            if progress_cb:
+                try:
+                    progress_cb(0.0, 0, 0)
+                except Exception:
+                    pass
+    raise last or RuntimeError("download failed")
+
+
+def _download_once(url: str, fmt: str, client: str, task_dir: str,
+                   progress_cb=None, cancelled=None) -> tuple:
+    """Single download attempt with one player client."""
     import yt_dlp
 
     def hook(d):
