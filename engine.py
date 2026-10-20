@@ -167,23 +167,36 @@ def _client_chain(primary: str) -> list:
     return chain[:4]
 
 
-def download_media(url: str, fmt: str, client: str, task_dir: str,
-                   progress_cb=None, cancelled=None) -> tuple:
-    """Download with automatic client fallback on YouTube IP blocks.
+def _hls_fmt(fmt: str, want_h) -> str:
+    """Selector variant that prefers m3u8/HLS formats — YouTube does NOT
+    SABR-gate HLS the way it gates https GVS URLs."""
+    if want_h:
+        return (f"bv*[protocol^=m3u8][height<={want_h}]+ba/"
+                f"bv*[height<={want_h}]+ba/b[height<={want_h}]/b")
+    return "bv*[protocol^=m3u8]+ba/bv*+ba/b"
 
-    YouTube 403s ("unable to download video data") are format-URL blocks
-    tied to the player client that issued them — switching to another
-    client (fresh URLs + fresh PO token) usually succeeds. Retries are
-    bounded to the first 4 clients in the chain.
+
+def download_media(url: str, fmt: str, client: str, task_dir: str,
+                   progress_cb=None, cancelled=None, want_h=None) -> tuple:
+    """Download with self-healing retries. Two failure modes are handled:
+
+    1. Hard YouTube blocks (403/forbidden/...) → hop to the next player
+       client (fresh URLs + fresh PO token).
+    2. SILENT DOWNGRADES — YouTube's SABR streaming strips direct URLs for
+       higher qualities; yt-dlp then quietly falls back to 360p and
+       "succeeds". We detect delivered_height << wanted height and retry
+       with an HLS-preferring selector (HLS is not SABR-gated), then with
+       the remaining clients. The best result across attempts wins.
     """
     import yt_dlp
     chain = _client_chain(client)
     last = None
+    best = None          # (height, result)
     for attempt, c in enumerate(chain):
         if cancelled is not None and cancelled():
             raise yt_dlp.utils.DownloadCancelled()
         try:
-            return _download_once(url, fmt, c, task_dir, progress_cb, cancelled)
+            res = _download_once(url, fmt, c, task_dir, progress_cb, cancelled)
         except yt_dlp.utils.DownloadCancelled:
             raise
         except yt_dlp.utils.DownloadError as e:
@@ -200,19 +213,63 @@ def download_media(url: str, fmt: str, client: str, task_dir: str,
                 raise
             log.warning("download failed with client=%s (%.140s) — retrying with %s",
                         c, str(e), nxt)
-            # clean partial files so the next attempt starts fresh
-            for pat in ("*.part", "*.ytdl", "*.f*.part-Frag*"):
-                for p in glob.glob(os.path.join(task_dir, pat)):
-                    try:
-                        os.remove(p)
-                    except OSError:
-                        pass
+            _clean_partials(task_dir)
             if progress_cb:
                 try:
                     progress_cb(0.0, 0, 0)
                 except Exception:
                     pass
+            continue
+
+        got_h = (res[2] or {}).get("height") or 0
+        if best is None or got_h > best[0]:
+            best = (got_h, res)
+
+        # silent downgrade? (wanted 720/1080, got much less) → try harder
+        if want_h and got_h and got_h + 60 < want_h:
+            log.warning("silent downgrade detected: wanted %dp, got %dp "
+                        "(client=%s) — retrying with HLS-preferring selector",
+                        want_h, got_h, c)
+            _clean_partials(task_dir)
+            try:
+                res2 = _download_once(url, _hls_fmt(fmt, want_h), c, task_dir,
+                                      progress_cb, cancelled)
+                got2 = (res2[2] or {}).get("height") or 0
+                if got2 > got_h:
+                    log.info("HLS retry delivered %dp (was %dp)", got2, got_h)
+                    best = max([(got2, res2), best], key=lambda x: x[0])
+                    res, got_h = res2, got2
+            except yt_dlp.utils.DownloadCancelled:
+                raise
+            except Exception as e:
+                log.warning("HLS retry failed: %.140s", e)
+
+            if got_h + 60 >= want_h:
+                return best[1]                       # fixed!
+            nxt = chain[attempt + 1] if attempt + 1 < len(chain) else None
+            if nxt:
+                if progress_cb:
+                    try:
+                        progress_cb(0.0, 0, 0)
+                    except Exception:
+                        pass
+                continue                             # try next client
+        else:
+            return best[1]                           # quality OK
+
+    if best is not None:
+        return best[1]                               # best effort > error
     raise last or RuntimeError("download failed")
+
+
+def _clean_partials(task_dir: str) -> None:
+    """Remove partial download files between retry attempts."""
+    for pat in ("*.part", "*.ytdl", "*.f*.part-Frag*"):
+        for p in glob.glob(os.path.join(task_dir, pat)):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
 
 
 def _download_once(url: str, fmt: str, client: str, task_dir: str,

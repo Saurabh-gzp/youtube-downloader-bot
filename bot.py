@@ -78,7 +78,7 @@ import urllib.parse
 _DEBUG_LAST = {"t": 0.0}
 
 
-def _debug_extract(url: str, probe: bool = False):
+def _debug_extract(url: str, probe: bool = False, clients=None):
     """Per-client YouTube extraction report — shows exactly what each player
     client returns from THIS container's IP (heights, format counts, errors)."""
     import yt_dlp
@@ -88,7 +88,7 @@ def _debug_extract(url: str, probe: bool = False):
     results = []
     best_info = None
     best_client = None
-    for client in config.YT_CLIENTS:
+    for client in (clients or config.YT_CLIENTS):
         entry = {"client": client}
         try:
             opts = engine._base_opts(client)
@@ -188,8 +188,11 @@ class HealthHandler(BaseHTTPRequestHandler):
         else:
             _DEBUG_LAST["t"] = now
             try:
+                cl = [c.strip() for c in
+                      (qs.get("clients") or [""])[0].split(",") if c.strip()]
                 body = json.dumps(_debug_extract(
-                    url, probe=(qs.get("probe") or ["0"])[0] == "1")).encode()
+                    url, probe=(qs.get("probe") or ["0"])[0] == "1",
+                    clients=cl or None)).encode()
             except Exception as e:
                 body = json.dumps({"error": str(e)[:200]}).encode()
         self.send_response(200)

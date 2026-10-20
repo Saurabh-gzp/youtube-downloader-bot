@@ -438,7 +438,7 @@ def register(app, db):
             try:
                 path, real_title, info = await asyncio.to_thread(
                     engine.download_media, url, qo["fmt"], client,
-                    task_dir, dprogress, cancelled)
+                    task_dir, dprogress, cancelled, qo.get("h"))
             except asyncio.CancelledError:
                 raise
             except Exception as e:

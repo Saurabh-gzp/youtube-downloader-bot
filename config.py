@@ -58,7 +58,7 @@ YOUTUBE_COOKIES = os.environ.get("YOUTUBE_COOKIES", "").strip()  # raw cookies.t
 PUBLIC_URL = (os.environ.get("APP_URL") or os.environ.get("PUBLIC_URL")
               or "https://youtube-downloader-bot.antideploy.app").strip().rstrip("/")
 
-VERSION = "5.6"
+VERSION = "5.7"
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
