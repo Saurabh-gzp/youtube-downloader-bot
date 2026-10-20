@@ -73,8 +73,70 @@ async def on_raw_update(_client, _update, _users, _chats):
 
 
 # ---------------- health endpoint (JSON) ----------------
+import urllib.parse
+
+_DEBUG_LAST = {"t": 0.0}
+
+
+def _debug_extract(url: str):
+    """Per-client YouTube extraction report — shows exactly what each player
+    client returns from THIS container's IP (heights, format counts, errors)."""
+    import yt_dlp
+    host = urllib.parse.urlparse(url).netloc.lower()
+    if not any(h in host for h in ("youtube.com", "youtu.be")):
+        return {"error": "only youtube urls allowed"}
+    results = []
+    for client in config.YT_CLIENTS:
+        entry = {"client": client}
+        try:
+            opts = engine._base_opts(client)
+            opts["skip_download"] = True
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+            fmts = [f for f in (info.get("formats") or [])
+                    if f.get("url") or f.get("fragments") or f.get("manifest_url")]
+            vids = [f for f in fmts if f.get("vcodec") not in (None, "none")]
+            heights = sorted({f.get("height") or 0 for f in vids})
+            entry.update(ok=True, n_formats=len(fmts), n_video=len(vids),
+                         heights=heights[-8:],
+                         score=list(engine._info_score(info)),
+                         title=(info.get("title") or "")[:60])
+        except Exception as e:
+            entry.update(ok=False, err=str(e)[:130])
+        results.append(entry)
+    return {"version": config.VERSION, "pot": _POT_OK["v"],
+            "yt_dlp": yt_dlp.version.__version__, "clients": results}
+
+
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/debug/extract":
+            self._handle_debug(parsed)
+            return
+        self._handle_health()
+
+    def _handle_debug(self, parsed):
+        qs = urllib.parse.parse_qs(parsed.query)
+        url = (qs.get("url") or [""])[0].strip()
+        now = time.time()
+        if now - _DEBUG_LAST["t"] < 15:
+            body = b'{"error": "rate limited, wait 15s"}'
+        elif not url:
+            body = b'{"error": "pass ?url=<youtube link>"}'
+        else:
+            _DEBUG_LAST["t"] = now
+            try:
+                body = json.dumps(_debug_extract(url)).encode()
+            except Exception as e:
+                body = json.dumps({"error": str(e)[:200]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_health(self):
         app = _APP_HOLDER[0] if _APP_HOLDER else None
         try:
             tg = bool(app.is_connected) if app else False
@@ -108,7 +170,8 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 def run_health_server():
     try:
-        HTTPServer(("0.0.0.0", config.PORT), HealthHandler).serve_forever()
+        from http.server import ThreadingHTTPServer
+        ThreadingHTTPServer(("0.0.0.0", config.PORT), HealthHandler).serve_forever()
     except Exception as e:
         log.warning("health server stopped: %s", e)
 
