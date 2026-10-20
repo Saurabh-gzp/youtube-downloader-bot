@@ -129,36 +129,43 @@ def _debug_extract(url: str, probe: bool = False):
         out["best_client"] = best_client
         out["hd_formats"] = detail[:14]
 
-    # optional real download probe: what does the 720p selector actually pick?
+    # simulate probes: what does each selector pick at download-time, + POT logs
     if probe and best_client:
-        import glob as _glob
-        probe_dir = "/tmp/ytdl_probe"
-        shutil.rmtree(probe_dir, ignore_errors=True)
-        os.makedirs(probe_dir, exist_ok=True)
-        probe = {"client": best_client}
+        logs = []
 
-        def hook(d):
-            if d.get("status") == "downloading":
-                idict = d.get("info_dict") or {}
-                probe["picked"] = {
-                    "format_id": idict.get("format_id"),
-                    "h": idict.get("height"),
-                    "proto": d.get("info_dict", {}).get("protocol"),
-                    "downloaded_bytes": d.get("downloaded_bytes", 0),
-                }
-                raise yt_dlp.utils.DownloadCancelled()
+        class _Cap:
+            def debug(self, msg): logs.append(str(msg))
+            def info(self, msg): logs.append(str(msg))
+            def warning(self, msg): logs.append(str(msg))
+            def error(self, msg): logs.append(str(msg))
 
-        try:
-            engine._download_once(url, "bv*[height<=720]+ba/b[height<=720]/b",
-                                  best_client, probe_dir, progress_cb=hook)
-            probe["result"] = "completed?! (should have cancelled)"
-        except yt_dlp.utils.DownloadCancelled:
-            probe["result"] = "cancelled after first bytes (expected)"
-        except Exception as e:
-            probe["result"] = "ERROR: " + str(e)[:180]
-        finally:
-            shutil.rmtree(probe_dir, ignore_errors=True)
-        out["probe_720"] = probe
+        def simulate(fmt, tag):
+            import tempfile
+            d = os.path.join(tempfile.gettempdir(), "ytdl_probe")
+            shutil.rmtree(d, ignore_errors=True)
+            os.makedirs(d, exist_ok=True)
+            r = {"tag": tag}
+            try:
+                path, title, info = engine._download_once(
+                    url, fmt, best_client, d, logger=_Cap())
+                r.update(ok=True, picked_id=info.get("format_id"),
+                         picked_h=info.get("height"),
+                         picked_proto=info.get("protocol"),
+                         file=os.path.basename(path) if path else "")
+            except Exception as e:
+                r.update(ok=False, err=str(e)[:200])
+            shutil.rmtree(d, ignore_errors=True)
+            return r
+
+        out["probe_720"] = simulate(
+            "bv*[height<=720]+ba/b[height<=720]/b", "720p normal")
+        out["probe_720_https"] = simulate(
+            "bv*[height<=720][protocol^=https]+ba[protocol^=https]/b",
+            "720p https-only (GVS)")
+        kw = ("pot", "po token", "bgutil", "sabr", "403", "forbidden",
+              "visitor", "player_client", "format")
+        out["logs"] = [l[:220] for l in logs
+                       if any(k in l.lower() for k in kw)][-45:]
     return out
 
 

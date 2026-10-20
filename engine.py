@@ -216,7 +216,7 @@ def download_media(url: str, fmt: str, client: str, task_dir: str,
 
 
 def _download_once(url: str, fmt: str, client: str, task_dir: str,
-                   progress_cb=None, cancelled=None) -> tuple:
+                   progress_cb=None, cancelled=None, logger=None) -> tuple:
     """Single download attempt with one player client."""
     import yt_dlp
 
@@ -234,6 +234,9 @@ def _download_once(url: str, fmt: str, client: str, task_dir: str,
 
     is_audio = fmt.endswith("bestaudio") or "bestaudio" in fmt.split("/")
     opts = _base_opts(client)
+    if logger is not None:
+        opts["logger"] = logger
+        opts["verbose"] = True
     opts.update({
         "format": fmt,
         "outtmpl": os.path.join(task_dir, "%(id)s.%(ext)s"),
